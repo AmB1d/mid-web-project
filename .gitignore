@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# Environment variables
+.env
+.env.local
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Server data (keep structure but ignore actual data)
+server/data/users.json
+server/data/playlists/*.json
+server/uploads/*
+
+# Keep directory structure
+!server/data/.gitkeep
+!server/data/playlists/.gitkeep
+!server/uploads/.gitkeep
+
