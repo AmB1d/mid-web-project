@@ -17,6 +17,10 @@ const sessionMiddleware = require('./config/session');
 const authRoutes = require('./routes/authRoutes');
 const { requireAuth, getCurrentUser } = require('./middleware/auth');
 const { getDatabase } = require('./config/database');
+const PlaylistRepository = require('./repositories/PlaylistRepository');
+
+// Initialize playlist repository
+const playlistRepository = new PlaylistRepository();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -328,37 +332,13 @@ app.get('/api/search', requireAuth, async (req, res) => {
     }
 });
 
-// Playlists API - Keep existing JSON-based playlists for now (can be migrated to DB later)
-async function getUserPlaylistFile(username) {
-    return path.join(PLAYLISTS_DIR, `${username}.json`);
-}
+// ==================== PLAYLISTS API (SQLite Database) ====================
 
-async function readUserPlaylist(username) {
-    try {
-        const filePath = await getUserPlaylistFile(username);
-        const data = await fs.readFile(filePath, 'utf8');
-        return JSON.parse(data);
-    } catch (error) {
-        return { playlists: [] };
-    }
-}
-
-async function writeUserPlaylist(username, playlistData) {
-    await fs.mkdir(PLAYLISTS_DIR, { recursive: true });
-    const filePath = await getUserPlaylistFile(username);
-    await fs.writeFile(filePath, JSON.stringify(playlistData, null, 2), 'utf8');
-}
-
+// Get all playlists for current user
 app.get('/api/playlists', requireAuth, async (req, res) => {
     try {
         const username = req.session.user.username;
-        const playlistData = await readUserPlaylist(username);
-        
-        const playlists = (playlistData.playlists || []).map(playlist => ({
-            ...playlist,
-            userId: playlist.userId || username
-        }));
-        
+        const playlists = await playlistRepository.findAllByUsername(username);
         res.json({ playlists });
     } catch (error) {
         console.error('Get playlists error:', error);
@@ -366,27 +346,25 @@ app.get('/api/playlists', requireAuth, async (req, res) => {
     }
 });
 
+// Save/sync all playlists for current user
 app.post('/api/playlists', requireAuth, async (req, res) => {
     try {
         const { playlists } = req.body;
+        const username = req.session.user.username;
         
         if (!playlists || !Array.isArray(playlists)) {
             return res.status(400).json({ error: 'Playlists must be an array' });
         }
         
+        // Validate playlist names
         for (const playlist of playlists) {
             if (!playlist.name || playlist.name.trim() === '') {
                 return res.status(400).json({ error: 'Playlist name cannot be empty' });
             }
-            
-            playlist.userId = req.session.user.username;
-            
-            if (!playlist.id) {
-                playlist.id = Date.now().toString();
-            }
         }
         
-        await writeUserPlaylist(req.session.user.username, { playlists });
+        // Save all playlists to database
+        await playlistRepository.saveAll(username, playlists);
         res.json({ success: true, message: 'Playlists saved successfully' });
     } catch (error) {
         console.error('Save playlists error:', error);
@@ -394,70 +372,61 @@ app.post('/api/playlists', requireAuth, async (req, res) => {
     }
 });
 
+// Add item to playlist
 app.post('/api/playlists/:id/items', requireAuth, async (req, res) => {
     try {
-        const playlistId = req.params.id;
+        const playlistId = parseInt(req.params.id);
         const username = req.session.user.username;
         const item = req.body;
         
-        if (!item || !item.videoId) {
-            return res.status(400).json({ error: 'Item must have videoId' });
+        if (!item || (!item.videoId && !item.title)) {
+            return res.status(400).json({ error: 'Item must have videoId or title' });
         }
         
-        const playlistData = await readUserPlaylist(username);
-        const playlist = playlistData.playlists.find(p => p.id === playlistId);
-        
-        if (!playlist) {
-            return res.status(404).json({ error: 'Playlist not found' });
+        // Check if playlist belongs to user
+        const belongsToUser = await playlistRepository.belongsToUser(playlistId, username);
+        if (!belongsToUser) {
+            return res.status(404).json({ error: 'Playlist not found or does not belong to user' });
         }
         
-        if (playlist.userId !== username) {
-            return res.status(403).json({ error: 'Playlist does not belong to user' });
+        // Add song to playlist
+        try {
+            const song = await playlistRepository.addSong(playlistId, item);
+            const playlist = await playlistRepository.findById(playlistId);
+            res.json({ success: true, message: 'Item added to playlist successfully', playlist, song });
+        } catch (err) {
+            if (err.message === 'Song already exists in playlist') {
+                return res.status(400).json({ error: 'Item already exists in playlist' });
+            }
+            throw err;
         }
-        
-        const exists = playlist.songs.some(s => s.videoId === item.videoId);
-        if (exists) {
-            return res.status(400).json({ error: 'Item already exists in playlist' });
-        }
-        
-        playlist.songs.push({
-            ...item,
-            addedAt: Date.now()
-        });
-        
-        await writeUserPlaylist(username, playlistData);
-        res.json({ success: true, message: 'Item added to playlist successfully', playlist });
     } catch (error) {
         console.error('Add item error:', error);
         res.status(500).json({ error: 'Error adding item to playlist' });
     }
 });
 
+// Delete item from playlist
 app.delete('/api/playlists/:id/items/:videoId', requireAuth, async (req, res) => {
     try {
-        const playlistId = req.params.id;
+        const playlistId = parseInt(req.params.id);
         const videoId = req.params.videoId;
         const username = req.session.user.username;
         
-        const playlistData = await readUserPlaylist(username);
-        const playlist = playlistData.playlists.find(p => p.id === playlistId);
-        
-        if (!playlist) {
-            return res.status(404).json({ error: 'Playlist not found' });
+        // Check if playlist belongs to user
+        const belongsToUser = await playlistRepository.belongsToUser(playlistId, username);
+        if (!belongsToUser) {
+            return res.status(404).json({ error: 'Playlist not found or does not belong to user' });
         }
         
-        if (playlist.userId !== username) {
-            return res.status(403).json({ error: 'Playlist does not belong to user' });
-        }
+        // Remove song from playlist
+        const removed = await playlistRepository.removeSong(playlistId, videoId);
         
-        const initialLength = playlist.songs.length;
-        playlist.songs = playlist.songs.filter(s => s.videoId !== videoId);
-        
-        if (playlist.songs.length === initialLength) {
+        if (!removed) {
             return res.status(404).json({ error: 'Item not found in playlist' });
         }
         
-        await writeUserPlaylist(username, playlistData);
+        const playlist = await playlistRepository.findById(playlistId);
         res.json({ success: true, message: 'Item deleted from playlist successfully', playlist });
     } catch (error) {
         console.error('Delete item error:', error);
@@ -465,23 +434,20 @@ app.delete('/api/playlists/:id/items/:videoId', requireAuth, async (req, res) =>
     }
 });
 
+// Delete a playlist
 app.delete('/api/playlists/:id', requireAuth, async (req, res) => {
     try {
-        const playlistId = req.params.id;
+        const playlistId = parseInt(req.params.id);
         const username = req.session.user.username;
         
-        const playlistData = await readUserPlaylist(username);
-        const initialLength = playlistData.playlists.length;
-        
-        playlistData.playlists = playlistData.playlists.filter(p => {
-            return p.id !== playlistId || p.userId !== username;
-        });
-        
-        if (playlistData.playlists.length === initialLength) {
+        // Check if playlist belongs to user
+        const belongsToUser = await playlistRepository.belongsToUser(playlistId, username);
+        if (!belongsToUser) {
             return res.status(404).json({ error: 'Playlist not found or does not belong to user' });
         }
         
-        await writeUserPlaylist(username, playlistData);
+        // Delete playlist (songs will be deleted automatically due to CASCADE)
+        await playlistRepository.delete(playlistId);
         res.json({ success: true, message: 'Playlist deleted successfully' });
     } catch (error) {
         console.error('Delete playlist error:', error);
@@ -495,9 +461,11 @@ app.post('/api/upload/mp3', requireAuth, upload.single('mp3file'), async (req, r
             return res.status(400).json({ error: 'No file uploaded' });
         }
 
+        const username = req.session.user.username;
         const fileUrl = `/uploads/${req.file.filename}`;
+        
         const songData = {
-            id: Date.now().toString(),
+            videoId: `mp3-${Date.now()}`, // Unique ID for MP3 files
             type: 'mp3',
             title: req.body.title || req.file.originalname.replace('.mp3', ''),
             channelTitle: req.body.artist || 'Unknown Artist',
@@ -505,34 +473,34 @@ app.post('/api/upload/mp3', requireAuth, upload.single('mp3file'), async (req, r
             fileUrl: fileUrl,
             duration: req.body.duration || '0:00',
             viewCount: '0',
-            rating: 0,
-            uploadedAt: new Date().toISOString()
+            rating: 0
         };
 
-        const playlistData = await readUserPlaylist(req.session.user.username);
-        if (playlistData.playlists.length === 0) {
-            playlistData.playlists.push({
-                id: Date.now().toString(),
-                name: 'My Playlist',
-                songs: []
-            });
-        }
-
-        const playlistId = req.body.playlistId || playlistData.playlists[0].id;
-        const playlist = playlistData.playlists.find(p => p.id === playlistId);
+        // Get user's playlists
+        let playlists = await playlistRepository.findAllByUsername(username);
         
-        if (playlist) {
-            playlist.songs.push(songData);
-        } else {
-            playlistData.playlists[0].songs.push(songData);
+        // If user has no playlists, create a default one
+        if (playlists.length === 0) {
+            await playlistRepository.createByUsername(username, 'My Playlist');
+            playlists = await playlistRepository.findAllByUsername(username);
         }
 
-        await writeUserPlaylist(req.session.user.username, playlistData);
+        // Find target playlist
+        let targetPlaylistId = req.body.playlistId ? parseInt(req.body.playlistId) : parseInt(playlists[0].id);
+        
+        // Check if playlist belongs to user
+        const belongsToUser = await playlistRepository.belongsToUser(targetPlaylistId, username);
+        if (!belongsToUser) {
+            targetPlaylistId = parseInt(playlists[0].id);
+        }
+        
+        // Add song to playlist
+        const song = await playlistRepository.addSong(targetPlaylistId, songData);
 
         res.json({
             success: true,
             message: 'File uploaded and added to playlist',
-            song: songData
+            song: song
         });
     } catch (error) {
         console.error('Upload error:', error);

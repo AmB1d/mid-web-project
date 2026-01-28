@@ -80,6 +80,10 @@ class Database {
                             return this.migrateUsersFromJSON();
                         })
                         .then(() => {
+                            // Migrate existing playlists from JSON if needed
+                            return this.migratePlaylistsFromJSON();
+                        })
+                        .then(() => {
                             resolve(this.db);
                         })
                         .catch((error) => {
@@ -267,6 +271,98 @@ class Database {
             console.log('User migration completed');
         } catch (error) {
             console.error('Error during user migration:', error);
+            // Don't throw - migration is optional
+        }
+    }
+
+    async migratePlaylistsFromJSON() {
+        try {
+            const playlistsDir = path.join(__dirname, '..', 'data', 'playlists');
+            
+            // Check if playlists directory exists
+            try {
+                await fs.access(playlistsDir);
+            } catch {
+                return; // No playlists directory, nothing to migrate
+            }
+
+            // Read all JSON files in playlists directory
+            const files = await fs.readdir(playlistsDir);
+            const jsonFiles = files.filter(f => f.endsWith('.json'));
+
+            if (jsonFiles.length === 0) {
+                return;
+            }
+
+            // Check if there are already playlists in the database
+            const existingPlaylists = await this.query('SELECT COUNT(*) as count FROM playlists');
+            if (existingPlaylists[0].count > 0) {
+                // Database already has playlists, skip migration
+                return;
+            }
+
+            console.log(`Migrating playlists from ${jsonFiles.length} JSON file(s)...`);
+
+            for (const file of jsonFiles) {
+                const username = file.replace('.json', '');
+                const filePath = path.join(playlistsDir, file);
+
+                try {
+                    const data = await fs.readFile(filePath, 'utf8');
+                    const playlistData = JSON.parse(data);
+
+                    if (!playlistData.playlists || !Array.isArray(playlistData.playlists)) {
+                        continue;
+                    }
+
+                    // Get user ID
+                    const user = await this.get('SELECT id FROM users WHERE username = ?', [username]);
+                    if (!user) {
+                        console.log(`User ${username} not found, skipping playlist migration`);
+                        continue;
+                    }
+
+                    // Migrate each playlist
+                    for (const playlist of playlistData.playlists) {
+                        // Create playlist
+                        const result = await this.run(
+                            'INSERT INTO playlists (user_id, name) VALUES (?, ?)',
+                            [user.id, playlist.name]
+                        );
+
+                        const playlistId = result.lastID;
+
+                        // Migrate songs
+                        if (playlist.songs && Array.isArray(playlist.songs)) {
+                            for (const song of playlist.songs) {
+                                await this.run(`
+                                    INSERT INTO songs (playlist_id, video_id, title, channel_title, thumbnail, duration, view_count, rating, file_url, type)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                `, [
+                                    playlistId,
+                                    song.videoId || null,
+                                    song.title || 'Unknown Title',
+                                    song.channelTitle || 'Unknown Artist',
+                                    song.thumbnail || 'https://via.placeholder.com/320x180',
+                                    song.duration || '0:00',
+                                    song.viewCount || '0',
+                                    song.rating || 0,
+                                    song.fileUrl || null,
+                                    song.type || 'youtube'
+                                ]);
+                            }
+                        }
+
+                        console.log(`Migrated playlist "${playlist.name}" for user ${username} with ${playlist.songs?.length || 0} songs`);
+                    }
+                } catch (err) {
+                    console.error(`Error migrating playlist file ${file}:`, err);
+                }
+            }
+
+            console.log('Playlist migration completed');
+        } catch (error) {
+            console.error('Error during playlist migration:', error);
             // Don't throw - migration is optional
         }
     }
