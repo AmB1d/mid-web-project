@@ -23,6 +23,8 @@ Thumbs.db
 # Server data (keep structure but ignore actual data)
 server/data/users.json
 server/data/playlists/*.json
+server/data/database.db
+server/data/sessions.sqlite
 server/uploads/*
 
 # Keep directory structure

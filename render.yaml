@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: mid-web-project
+    env: node
+    rootDir: server
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: SESSION_SECRET
+        sync: false  # IMPORTANT: Set this manually in Render dashboard with a strong random string
+      - key: YOUTUBE_API_KEY
+        sync: false  # IMPORTANT: Set this manually in Render dashboard with your YouTube API key

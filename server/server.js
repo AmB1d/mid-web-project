@@ -41,12 +41,23 @@ async function ensureDirectories() {
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, 'views'));
 
+// Trust proxy (important for Render and other hosting services)
+app.set('trust proxy', 1);
+
 // Middleware
-app.use(cors());
+// CORS configuration - allow credentials for sessions
+app.use(cors({
+    origin: true, // Allow all origins (or specify your Render URL)
+    credentials: true, // Allow cookies/sessions
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+}));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Session configuration (using SQLite store)
+// Note: session store will create data directory automatically, but we ensure it exists first
+// We initialize session middleware after directories are created in startServer()
 app.use(sessionMiddleware);
 
 // Make user available to all views
@@ -532,16 +543,75 @@ app.post('/api/upload/mp3', requireAuth, upload.single('mp3file'), async (req, r
 // Initialize database and start server
 async function startServer() {
     try {
-        await ensureDirectories();
-        await getDatabase(); // Initialize database
+        console.log('=== Starting server initialization ===');
+        console.log('Current working directory:', process.cwd());
+        console.log('__dirname:', __dirname);
+        console.log('Node version:', process.version);
         
+        // Ensure all directories exist first
+        console.log('Step 1: Creating directories...');
+        console.log('DATA_DIR:', DATA_DIR);
+        console.log('PLAYLISTS_DIR:', PLAYLISTS_DIR);
+        console.log('UPLOADS_DIR:', UPLOADS_DIR);
+        
+        await ensureDirectories();
+        console.log('Directories created');
+        
+        // Verify directories exist
+        console.log('Step 2: Verifying directories exist...');
+        try {
+            await fs.access(DATA_DIR);
+            console.log('✓ DATA_DIR exists');
+            await fs.access(PLAYLISTS_DIR);
+            console.log('✓ PLAYLISTS_DIR exists');
+            await fs.access(UPLOADS_DIR);
+            console.log('✓ UPLOADS_DIR exists');
+            console.log('All directories verified');
+        } catch (err) {
+            console.error('✗ Directory verification failed:', err);
+            console.error('Error details:', err.message);
+            console.error('Error stack:', err.stack);
+            throw new Error('Failed to create required directories: ' + err.message);
+        }
+        
+        // Initialize database (this will create the database file if it doesn't exist)
+        console.log('Step 3: Initializing database...');
+        try {
+            await getDatabase(); // Initialize database
+            console.log('✓ Database initialized successfully');
+        } catch (dbError) {
+            console.error('✗ Database initialization failed:', dbError);
+            console.error('Database error details:', dbError.message);
+            console.error('Database error stack:', dbError.stack);
+            throw dbError;
+        }
+        
+        console.log('Step 4: Starting HTTP server...');
         app.listen(PORT, () => {
+            console.log('=== Server started successfully ===');
             console.log(`Server is running on http://localhost:${PORT}`);
             console.log(`Database: SQLite at ${path.join(DATA_DIR, 'database.db')}`);
+            console.log(`Sessions: SQLite at ${path.join(DATA_DIR, 'sessions.sqlite')}`);
             console.log(`Uploads directory: ${UPLOADS_DIR}`);
         });
+        
+        // Handle server errors
+        app.on('error', (err) => {
+            console.error('Server error:', err);
+        });
+        
     } catch (error) {
-        console.error('Failed to start server:', error);
+        console.error('=== SERVER STARTUP FAILED ===');
+        console.error('Error type:', error.constructor.name);
+        console.error('Error message:', error.message);
+        console.error('Error stack:', error.stack);
+        if (error.code) {
+            console.error('Error code:', error.code);
+        }
+        if (error.errno) {
+            console.error('Error errno:', error.errno);
+        }
+        console.error('=== END ERROR ===');
         process.exit(1);
     }
 }

@@ -1,37 +1,96 @@
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const fs = require('fs').promises;
+const fsSync = require('fs');
 
 class Database {
     constructor() {
         this.db = null;
-        this.dbPath = path.join(__dirname, '..', 'data', 'database.db');
+        // Use absolute path to ensure we're in the right location
+        this.dbPath = path.resolve(__dirname, '..', 'data', 'database.db');
     }
 
     async initialize() {
         try {
-            // Ensure data directory exists
+            // Ensure data directory exists with proper permissions
             const dataDir = path.dirname(this.dbPath);
-            await fs.mkdir(dataDir, { recursive: true });
-
-            // Create database connection
-            this.db = new sqlite3.Database(this.dbPath, (err) => {
-                if (err) {
-                    console.error('Error opening database:', err);
-                    throw err;
-                }
-                console.log('Connected to SQLite database');
-            });
-
-            // Create tables
-            await this.createTables();
+            console.log(`Creating data directory: ${dataDir}`);
             
-            // Migrate existing users from JSON if needed
-            await this.migrateUsersFromJSON();
+            // Try to create directory multiple times if needed
+            let retries = 3;
+            while (retries > 0) {
+                try {
+                    await fs.mkdir(dataDir, { recursive: true });
+                    // Verify it was created
+                    await fs.access(dataDir);
+                    console.log(`Data directory created successfully: ${dataDir}`);
+                    break;
+                } catch (err) {
+                    retries--;
+                    if (retries === 0) {
+                        console.error(`Failed to create data directory after retries: ${dataDir}`);
+                        console.error('Error:', err);
+                        throw err;
+                    }
+                    console.log(`Retrying directory creation (${retries} retries left)...`);
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                }
+            }
+            
+            // Also ensure playlists directory exists
+            const playlistsDir = path.join(dataDir, 'playlists');
+            console.log(`Creating playlists directory: ${playlistsDir}`);
+            await fs.mkdir(playlistsDir, { recursive: true });
+            await fs.access(playlistsDir);
+            console.log(`Playlists directory created successfully: ${playlistsDir}`);
+            
+            // Verify directory was created and is writable
+            try {
+                await fs.access(dataDir, fsSync.constants.W_OK);
+                console.log(`Data directory is writable: ${dataDir}`);
+            } catch (err) {
+                console.error(`Data directory is not writable: ${dataDir}`);
+                throw new Error(`Data directory is not writable: ${dataDir}`);
+            }
 
-            return this.db;
+            // Create database connection with error handling
+            console.log(`Opening database at: ${this.dbPath}`);
+            return new Promise((resolve, reject) => {
+                // Use absolute path and ensure directory exists
+                // OPEN_READWRITE | OPEN_CREATE allows creating the file if it doesn't exist
+                const flags = sqlite3.OPEN_READWRITE | sqlite3.OPEN_CREATE;
+                this.db = new sqlite3.Database(this.dbPath, flags, (err) => {
+                    if (err) {
+                        console.error('Error opening database:', err);
+                        console.error('Error code:', err.code);
+                        console.error('Error errno:', err.errno);
+                        console.error('Database path:', this.dbPath);
+                        console.error('Data directory:', dataDir);
+                        console.error('Current working directory:', process.cwd());
+                        console.error('__dirname:', __dirname);
+                        reject(err);
+                        return;
+                    }
+                    console.log('Connected to SQLite database:', this.dbPath);
+                    
+                    // Create tables
+                    this.createTables()
+                        .then(() => {
+                            // Migrate existing users from JSON if needed
+                            return this.migrateUsersFromJSON();
+                        })
+                        .then(() => {
+                            resolve(this.db);
+                        })
+                        .catch((error) => {
+                            console.error('Error during database setup:', error);
+                            reject(error);
+                        });
+                });
+            });
         } catch (error) {
             console.error('Database initialization error:', error);
+            console.error('Error stack:', error.stack);
             throw error;
         }
     }
