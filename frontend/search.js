@@ -1,20 +1,7 @@
 // Search page functionality with YouTube API
 
 document.addEventListener('DOMContentLoaded', function() {
-    // Require login
-    if (!requireLogin()) return;
-    
-    // Prevent back navigation to login/register pages
-    window.addEventListener('pageshow', function(event) {
-        if (event.persisted || (window.performance && window.performance.navigation.type === 2)) {
-            if (!isLoggedIn()) {
-                window.location.replace('login.html');
-            }
-        }
-    });
-    
-    // Display welcome message
-    displayWelcomeMessage();
+    // Server handles authentication - if not logged in, will redirect to /login
     
     const searchInput = document.getElementById('searchInput');
     const searchBtn = document.getElementById('searchBtn');
@@ -70,10 +57,10 @@ document.addEventListener('DOMContentLoaded', function() {
             return;
         }
         
-        const currentUser = getCurrentUser();
+        // Get username from server session (will be handled by server)
         const newPlaylist = {
             id: Date.now().toString(),
-            userId: currentUser.username,
+            userId: '', // Will be set by server
             name: playlistName,
             songs: []
         };
@@ -131,15 +118,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     });
     
-    function displayWelcomeMessage() {
-        const currentUser = getCurrentUser();
-        if (currentUser) {
-            document.getElementById('welcomeCard').style.display = 'block';
-            document.getElementById('welcomeUsername').textContent = currentUser.firstName;
-            const imageUrl = currentUser.imageUrl || 'https://via.placeholder.com/60';
-            document.getElementById('welcomeUserImage').src = imageUrl;
-        }
-    }
+    // Welcome message is displayed in EJS template
     
     async function performSearch() {
         const query = searchInput.value.trim();

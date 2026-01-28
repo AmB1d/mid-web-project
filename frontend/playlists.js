@@ -1,17 +1,7 @@
 // Playlists page functionality with sidebar and main content - using API
 
 document.addEventListener('DOMContentLoaded', async function() {
-    // Require login
-    if (!requireLogin()) return;
-    
-    // Prevent back navigation to login/register pages
-    window.addEventListener('pageshow', function(event) {
-        if (event.persisted || (window.performance && window.performance.navigation.type === 2)) {
-            if (!isLoggedIn()) {
-                window.location.replace('login.html');
-            }
-        }
-    });
+    // Server handles authentication - if not logged in, will redirect to /login
     
     const playlistsList = document.getElementById('playlistsList');
     const playlistContent = document.getElementById('playlistContent');
@@ -21,9 +11,43 @@ document.addEventListener('DOMContentLoaded', async function() {
     const toastElement = document.getElementById('playlistToast');
     const toastBody = document.getElementById('playlistToastBody');
     
+    // Stop Play All when modal is closed
+    const playerModalElement = document.getElementById('playerModal');
+    if (playerModalElement) {
+        playerModalElement.addEventListener('hidden.bs.modal', function() {
+            if (playAllMode) {
+                // Stop Play All mode when user closes the modal
+                playAllMode = false;
+                currentPlayAllIndex = -1;
+                playAllSongs = [];
+                
+                // Stop any playing media
+                const audioPlayerEl = document.getElementById('audioPlayer');
+                if (audioPlayerEl) {
+                    audioPlayerEl.pause();
+                    audioPlayerEl.src = '';
+                }
+                
+                if (youtubePlayerAPI) {
+                    try {
+                        youtubePlayerAPI.stopVideo();
+                    } catch (e) {
+                        console.log('Error stopping YouTube player:', e);
+                    }
+                }
+            }
+        });
+    }
+    
     let currentPlaylistId = null;
     let currentSongs = [];
     let allPlaylists = [];
+    
+    // Play All mode variables
+    let playAllMode = false;
+    let currentPlayAllIndex = -1;
+    let playAllSongs = [];
+    let youtubePlayerAPI = null;
     
     // Check URL for playlist ID
     const urlParams = new URLSearchParams(window.location.search);
@@ -63,10 +87,10 @@ document.addEventListener('DOMContentLoaded', async function() {
             return;
         }
         
-        const currentUser = getCurrentUser();
+        // Get username from server session (will be handled by server)
         const newPlaylist = {
             id: Date.now().toString(),
-            userId: currentUser.username,
+            userId: '', // Will be set by server
             name: playlistName,
             songs: []
         };
@@ -91,19 +115,57 @@ document.addEventListener('DOMContentLoaded', async function() {
             e.preventDefault();
             console.log('Play All button clicked, currentSongs:', currentSongs.length);
             if (currentSongs.length > 0) {
-                const firstSong = currentSongs[0];
-                console.log('Playing first song:', firstSong);
-                if (firstSong.type === 'mp3') {
-                    playMP3(firstSong);
-                } else {
-                    playVideo(firstSong.videoId, firstSong.title, firstSong.channelTitle);
-                }
+                startPlayAll();
             } else {
                 alert('No songs in playlist');
             }
         });
     } else {
         console.error('playAllBtn not found');
+    }
+    
+    function startPlayAll() {
+        playAllMode = true;
+        playAllSongs = [...currentSongs];
+        currentPlayAllIndex = 0;
+        playSongAtIndex(0);
+    }
+    
+    function playSongAtIndex(index) {
+        if (index < 0 || index >= playAllSongs.length) {
+            // Finished playing all songs
+            playAllMode = false;
+            currentPlayAllIndex = -1;
+            playAllSongs = [];
+            showToast('Finished playing all songs', 'success');
+            return;
+        }
+        
+        currentPlayAllIndex = index;
+        const song = playAllSongs[index];
+        
+        if (song.type === 'mp3') {
+            playMP3(song, true);
+        } else {
+            playVideo(song.videoId, song.title, song.channelTitle, true);
+        }
+    }
+    
+    function playNextSong() {
+        if (playAllMode && currentPlayAllIndex >= 0) {
+            const nextIndex = currentPlayAllIndex + 1;
+            if (nextIndex < playAllSongs.length) {
+                setTimeout(() => {
+                    playSongAtIndex(nextIndex);
+                }, 500); // Small delay before next song
+            } else {
+                // Finished all songs
+                playAllMode = false;
+                currentPlayAllIndex = -1;
+                playAllSongs = [];
+                showToast('Finished playing all songs', 'success');
+            }
+        }
     }
     
     // Internal search
@@ -443,8 +505,8 @@ document.addEventListener('DOMContentLoaded', async function() {
         displaySongs(sorted);
     }
     
-    function playVideo(videoId, title, channelTitle) {
-        console.log('playVideo called:', { videoId, title, channelTitle });
+    function playVideo(videoId, title, channelTitle, isPlayAll = false) {
+        console.log('playVideo called:', { videoId, title, channelTitle, isPlayAll });
         const playerTitleEl = document.getElementById('playerTitle');
         const playerTrackNameEl = document.getElementById('playerTrackName');
         const playerArtistNameEl = document.getElementById('playerArtistName');
@@ -461,7 +523,21 @@ document.addEventListener('DOMContentLoaded', async function() {
         if (playerArtistNameEl) {
             playerArtistNameEl.textContent = channelTitle;
         }
-        youtubePlayerEl.src = `https://www.youtube.com/embed/${videoId}?autoplay=1`;
+        
+        // Load YouTube IFrame API if not already loaded
+        if (!window.YT) {
+            const tag = document.createElement('script');
+            tag.src = 'https://www.youtube.com/iframe_api';
+            const firstScriptTag = document.getElementsByTagName('script')[0];
+            firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+            
+            window.onYouTubeIframeAPIReady = function() {
+                initYouTubePlayer(videoId, isPlayAll);
+            };
+        } else {
+            initYouTubePlayer(videoId, isPlayAll);
+        }
+        
         if (audioPlayerEl) {
             audioPlayerEl.style.display = 'none';
         }
@@ -469,8 +545,68 @@ document.addEventListener('DOMContentLoaded', async function() {
         playerModal.show();
     }
     
-    function playMP3(song) {
-        console.log('playMP3 called:', song);
+    function initYouTubePlayer(videoId, isPlayAll) {
+        const videoPlayerContainer = document.getElementById('videoPlayerContainer');
+        const youtubePlayerEl = document.getElementById('youtubePlayer');
+        
+        if (!videoPlayerContainer) {
+            console.error('Video player container not found');
+            return;
+        }
+        
+        // Destroy existing player if it exists
+        if (youtubePlayerAPI) {
+            try {
+                youtubePlayerAPI.destroy();
+            } catch (e) {
+                console.log('Error destroying existing player:', e);
+            }
+            youtubePlayerAPI = null;
+        }
+        
+        // Replace iframe with div for YouTube API
+        if (youtubePlayerEl && youtubePlayerEl.tagName === 'IFRAME') {
+            const newDiv = document.createElement('div');
+            newDiv.id = 'youtubePlayer';
+            newDiv.style.width = '100%';
+            newDiv.style.height = '500px';
+            youtubePlayerEl.parentNode.replaceChild(newDiv, youtubePlayerEl);
+        }
+        
+        // Create new player
+        youtubePlayerAPI = new YT.Player('youtubePlayer', {
+            videoId: videoId,
+            playerVars: {
+                autoplay: 1,
+                controls: 1,
+                rel: 0
+            },
+            events: {
+                'onReady': function(event) {
+                    console.log('YouTube player ready');
+                },
+                'onStateChange': function(event) {
+                    // YT.PlayerState.ENDED = 0
+                    if (event.data === YT.PlayerState.ENDED) {
+                        console.log('YouTube video ended');
+                        if (isPlayAll || playAllMode) {
+                            playNextSong();
+                        }
+                    }
+                },
+                'onError': function(event) {
+                    console.error('YouTube player error:', event.data);
+                    if (isPlayAll || playAllMode) {
+                        // Skip to next song on error
+                        playNextSong();
+                    }
+                }
+            }
+        });
+    }
+    
+    function playMP3(song, isPlayAll = false) {
+        console.log('playMP3 called:', song, isPlayAll);
         const playerTitleEl = document.getElementById('playerTitle');
         const playerTrackNameEl = document.getElementById('playerTrackName');
         const playerArtistNameEl = document.getElementById('playerArtistName');
@@ -490,9 +626,33 @@ document.addEventListener('DOMContentLoaded', async function() {
         if (youtubePlayerEl) {
             youtubePlayerEl.style.display = 'none';
         }
+        
+        // Remove previous event listener if exists
+        audioPlayerEl.removeEventListener('ended', handleAudioEnded);
+        
+        // Add event listener for when audio ends
+        if (isPlayAll || playAllMode) {
+            audioPlayerEl.addEventListener('ended', handleAudioEnded);
+        }
+        
         audioPlayerEl.src = song.fileUrl;
         audioPlayerEl.style.display = 'block';
         playerModal.show();
+        
+        // Play the audio
+        audioPlayerEl.play().catch(err => {
+            console.error('Error playing audio:', err);
+            if (isPlayAll || playAllMode) {
+                playNextSong();
+            }
+        });
+    }
+    
+    function handleAudioEnded() {
+        console.log('MP3 audio ended');
+        if (playAllMode) {
+            playNextSong();
+        }
     }
     
     // Make functions available globally
